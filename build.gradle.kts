@@ -18,10 +18,21 @@ fun String.execute(currentWorkingDir: File = file("./")): String {
 val gitCommitCount = "git rev-list HEAD --count".execute().toInt()
 val gitCommitHash = "git rev-parse --verify --short HEAD".execute()
 
-// also the soname
-val moduleId by extra("sample")
-val moduleName by extra("Zygisk Module Sample")
-val verName by extra("v1")
+// ============ 修改这里 (Start) ============
+
+// 1. moduleId: 模块的唯一ID，也是生成的 .so 文件名。
+// 只能用英文、数字、下划线，不能有空格！
+val moduleId by extra("fgo_god_mode") 
+
+// 2. moduleName: 在 Magisk 面具里显示的名字
+// 可以用中文，可以有空格
+val moduleName by extra("FGO上帝模式") 
+
+// 3. verName: 版本号显示 (可选修改)
+val verName by extra("v1.0.0")
+
+// ============ 修改这里 (End) ============
+
 val verCode by extra(gitCommitCount)
 val commitHash by extra(gitCommitHash)
 val abiList by extra(listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64"))
