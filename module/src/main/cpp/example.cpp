@@ -1,79 +1,122 @@
-/* Copyright 2022-2023 John "topjohnwu" Wu
- *
- * Permission to use, copy, modify, and/or distribute this software for any
- * purpose with or without fee is hereby granted.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
- * REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY
- * AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
- * INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
- * LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
- * OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
- * PERFORMANCE OF THIS SOFTWARE.
- */
-
-#include <cstdlib>
-#include <unistd.h>
-#include <fcntl.h>
 #include <android/log.h>
-
+#include <sys/mman.h>
+#include <unistd.h>
+#include <dlfcn.h>
+#include <string>
+#include <thread>
+#include <vector>
+#include <fstream>
 #include "zygisk.hpp"
 
-using zygisk::Api;
-using zygisk::AppSpecializeArgs;
-using zygisk::ServerSpecializeArgs;
+#define LOG_TAG "FGO_GOD"
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "MyModule", __VA_ARGS__)
+// ==========================================
+// 你的 OFFSETS
+// ==========================================
+uintptr_t OFFSET_DAMAGE = 0x24bbfb8; // get_DealtDamage
+uintptr_t OFFSET_GUTS   = 0x24c1d90; // IsNotDeathDamage
 
+// ==========================================
+// 辅助工具：获取基址
+// ==========================================
+uintptr_t get_module_base(const char* module_name) {
+    FILE *fp;
+    uintptr_t addr = 0;
+    char filename[32], buffer[1024];
+    snprintf(filename, sizeof(filename), "/proc/self/maps");
+    fp = fopen(filename, "rt");
+    if (fp != NULL) {
+        while (fgets(buffer, sizeof(buffer), fp)) {
+            if (strstr(buffer, module_name)) {
+                addr = (uintptr_t)strtoul(buffer, NULL, 16);
+                break;
+            }
+        }
+        fclose(fp);
+    }
+    return addr;
+}
+
+// ==========================================
+// 核心黑科技：直接写内存 (无需 Dobby)
+// ==========================================
+// 这是一个极其粗暴的 Patch：直接把函数开头的指令改成 "MOV X0, #999999; RET"
+void patch_memory(uintptr_t absolute_addr, bool is_damage) {
+    // 更改内存页权限为可写
+    size_t page_size = sysconf(_SC_PAGESIZE);
+    uintptr_t page_start = absolute_addr & ~(page_size - 1);
+    mprotect((void*)page_start, page_size, PROT_READ | PROT_WRITE | PROT_EXEC);
+
+    if (is_damage) {
+        // 目标：让它返回 999999 (0xF423F)
+        // ARM64 汇编:
+        // MOV W0, #0x423F      -> 0x528847E0
+        // MOVK W0, #0xF, LSL#16 -> 0x72A001E0
+        // RET                  -> 0xD65F03C0
+        
+        uint32_t shellcode[] = {
+            0x528847E0, // MOV W0, #0x423F (16959)
+            0x72A001E0, // MOVK W0, #0xF, LSL#16 (result = 999999)
+            0xD65F03C0  // RET
+        };
+        memcpy((void*)absolute_addr, shellcode, sizeof(shellcode));
+        LOGD("FGO_GOD: 秒杀补丁已应用！");
+    } else {
+        // 目标：让它返回 True (1)
+        // MOV W0, #1  -> 0x52800020
+        // RET         -> 0xD65F03C0
+        uint32_t shellcode[] = {
+            0x52800020, // MOV W0, #1
+            0xD65F03C0  // RET
+        };
+        memcpy((void*)absolute_addr, shellcode, sizeof(shellcode));
+        LOGD("FGO_GOD: 无敌补丁已应用！");
+    }
+
+    // 清除指令缓存 (防止 CPU 执行旧指令)
+    __builtin___clear_cache((char*)absolute_addr, (char*)absolute_addr + 16);
+}
+
+void hack_thread() {
+    LOGD("FGO_GOD: 等待 libil2cpp.so...");
+    uintptr_t base_addr = 0;
+    while ((base_addr = get_module_base("libil2cpp.so")) == 0) {
+        usleep(100000);
+    }
+    
+    // 延迟 2 秒，等游戏加载稳一点
+    sleep(2);
+
+    patch_memory(base_addr + OFFSET_DAMAGE, true);
+    patch_memory(base_addr + OFFSET_GUTS, false);
+}
+
+// Zygisk 样板代码
 class MyModule : public zygisk::ModuleBase {
 public:
-    void onLoad(Api *api, JNIEnv *env) override {
+    void onLoad(zygisk::Api *api, JNIEnv *env) override {
         this->api = api;
         this->env = env;
     }
+    void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
+        const char *raw_process = env->GetStringUTFChars(args->nice_name, nullptr);
+        std::string process_name(raw_process);
+        env->ReleaseStringUTFChars(args->nice_name, raw_process);
 
-    void preAppSpecialize(AppSpecializeArgs *args) override {
-        // Use JNI to fetch our process name
-        const char *process = env->GetStringUTFChars(args->nice_name, nullptr);
-        preSpecialize(process);
-        env->ReleaseStringUTFChars(args->nice_name, process);
+        // 修改为你的包名
+        if (process_name == "com.bilibili.fatego") {
+            LOGD("FGO_GOD: 锁定目标！");
+            api->setOption(zygisk::Option::FORCE_DENYLIST_UNMOUNT);
+        } else {
+            api->setOption(zygisk::Option::DLCLOSE_MODULE_LIBRARY);
+        }
     }
-
-    void preServerSpecialize(ServerSpecializeArgs *args) override {
-        preSpecialize("system_server");
+    void postAppSpecialize(const zygisk::AppSpecializeArgs *) override {
+        std::thread(hack_thread).detach();
     }
-
 private:
-    Api *api;
+    zygisk::Api *api;
     JNIEnv *env;
-
-    void preSpecialize(const char *process) {
-        // Demonstrate connecting to to companion process
-        // We ask the companion for a random number
-        unsigned r = 0;
-        int fd = api->connectCompanion();
-        read(fd, &r, sizeof(r));
-        close(fd);
-        LOGD("process=[%s], r=[%u]\n", process, r);
-
-        // Since we do not hook any functions, we should let Zygisk dlclose ourselves
-        api->setOption(zygisk::Option::DLCLOSE_MODULE_LIBRARY);
-    }
-
 };
-
-static int urandom = -1;
-
-static void companion_handler(int i) {
-    if (urandom < 0) {
-        urandom = open("/dev/urandom", O_RDONLY);
-    }
-    unsigned r;
-    read(urandom, &r, sizeof(r));
-    LOGD("companion r=[%u]\n", r);
-    write(i, &r, sizeof(r));
-}
-
-// Register our module class and the companion handler function
 REGISTER_ZYGISK_MODULE(MyModule)
-REGISTER_ZYGISK_COMPANION(companion_handler)
