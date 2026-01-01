@@ -2,10 +2,14 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <dlfcn.h>
+// ============ 修复部分 Start ============
+#include <cstdio>   // 替代 fstream，更轻量
+#include <cstdlib>  // 包含 strtoul
+#include <cstring>  // 包含 strstr
+// ============ 修复部分 End ============
 #include <string>
 #include <thread>
 #include <vector>
-#include <fstream>
 #include "zygisk.hpp"
 
 #define LOG_TAG "FGO_GOD"
@@ -41,7 +45,6 @@ uintptr_t get_module_base(const char* module_name) {
 // ==========================================
 // 核心黑科技：直接写内存 (无需 Dobby)
 // ==========================================
-// 这是一个极其粗暴的 Patch：直接把函数开头的指令改成 "MOV X0, #999999; RET"
 void patch_memory(uintptr_t absolute_addr, bool is_damage) {
     // 更改内存页权限为可写
     size_t page_size = sysconf(_SC_PAGESIZE);
@@ -49,12 +52,7 @@ void patch_memory(uintptr_t absolute_addr, bool is_damage) {
     mprotect((void*)page_start, page_size, PROT_READ | PROT_WRITE | PROT_EXEC);
 
     if (is_damage) {
-        // 目标：让它返回 999999 (0xF423F)
-        // ARM64 汇编:
-        // MOV W0, #0x423F      -> 0x528847E0
-        // MOVK W0, #0xF, LSL#16 -> 0x72A001E0
-        // RET                  -> 0xD65F03C0
-        
+        // 目标：返回 999999 (0xF423F)
         uint32_t shellcode[] = {
             0x528847E0, // MOV W0, #0x423F (16959)
             0x72A001E0, // MOVK W0, #0xF, LSL#16 (result = 999999)
@@ -63,9 +61,7 @@ void patch_memory(uintptr_t absolute_addr, bool is_damage) {
         memcpy((void*)absolute_addr, shellcode, sizeof(shellcode));
         LOGD("FGO_GOD: 秒杀补丁已应用！");
     } else {
-        // 目标：让它返回 True (1)
-        // MOV W0, #1  -> 0x52800020
-        // RET         -> 0xD65F03C0
+        // 目标：返回 True (1)
         uint32_t shellcode[] = {
             0x52800020, // MOV W0, #1
             0xD65F03C0  // RET
@@ -74,7 +70,7 @@ void patch_memory(uintptr_t absolute_addr, bool is_damage) {
         LOGD("FGO_GOD: 无敌补丁已应用！");
     }
 
-    // 清除指令缓存 (防止 CPU 执行旧指令)
+    // 清除指令缓存
     __builtin___clear_cache((char*)absolute_addr, (char*)absolute_addr + 16);
 }
 
@@ -104,7 +100,6 @@ public:
         std::string process_name(raw_process);
         env->ReleaseStringUTFChars(args->nice_name, raw_process);
 
-        // 修改为你的包名
         if (process_name == "com.bilibili.fatego") {
             LOGD("FGO_GOD: 锁定目标！");
             api->setOption(zygisk::Option::FORCE_DENYLIST_UNMOUNT);
