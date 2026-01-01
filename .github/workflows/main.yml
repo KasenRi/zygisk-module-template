@@ -16,7 +16,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: recursive  # <--- 关键修复：这里会下载所有依赖库！
+          submodules: recursive
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -31,10 +31,11 @@ jobs:
         uses: gradle/actions/setup-gradle@v3
 
       - name: Build with Gradle
-        run: ./gradlew :module:assembleRelease
+        run: ./gradlew :module:zipRelease  # <--- 关键修改：改为 zipRelease 才会生成 zip 包！
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: FGO-GodMode-Release
           path: module/release/*.zip
+          if-no-files-found: error # 如果还没找到文件就报错，方便排查
