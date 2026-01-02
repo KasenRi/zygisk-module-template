@@ -16,13 +16,11 @@
 // ==========================================
 // Offset 配置
 // ==========================================
-// Target: public Int32 getMaxHp() 
-// 我们只改 HP，不改 ATK，防止闪退
+// 1. HP: getMaxHp (Int)
 uintptr_t OFFSET_HP  = 0x24a7b20;
 
-// Field Offset: public Boolean isEnemy; // 0x1f3
-// 这是一个非常关键的偏移，用于判断是敌是友
-#define OFFSET_IS_ENEMY 0x1F3
+// 2. ATK: getCommandCardATK (Float) - 相比 getUpDownAtk 更稳定
+uintptr_t OFFSET_ATK = 0x24be8bc;
 
 struct callback_data {
     const char *name;
@@ -55,7 +53,6 @@ void write_code(void *dest_addr, unsigned char *code, size_t size) {
     long page_size = sysconf(_SC_PAGESIZE);
     void *page_start = (void *)((uintptr_t)dest_addr & ~(page_size - 1));
     
-    // 需要足够的空间，防止指令越界
     if (mprotect(page_start, page_size * 2, PROT_READ | PROT_WRITE) == -1) return;
     memcpy(dest_addr, code, size);
     if (mprotect(page_start, page_size * 2, PROT_READ | PROT_EXEC) == -1) return;
@@ -86,44 +83,55 @@ void *hack_thread(void *arg) {
     sleep(10); 
 
     void *addr_hp  = (void *)((uintptr_t)il2cpp_base + OFFSET_HP);
+    void *addr_atk = (void *)((uintptr_t)il2cpp_base + OFFSET_ATK);
     
-    LOGD("Applying SMART HP Patch (GodMode + OneHitKill)...");
+    LOGD("Applying Final Balanced Patch...");
 
     // ---------------------------------------------------------
-    // 智能 HP Patch (ARM64 Assembly)
-    // 逻辑：
-    // 1. 读取 this->isEnemy (Offset 0x1F3)
-    // 2. 如果是敌人 (isEnemy != 0) -> 返回 1 (秒杀)
-    // 3. 如果是玩家 (isEnemy == 0) -> 返回 100,000 (无敌)
+    // 1. HP Patch (Simple Int)
+    // 效果: 所有人(敌我) HP = 100,000
     // ---------------------------------------------------------
-    unsigned char patch_hp_smart[] = {
-        // 1. 读取 isEnemy 标志位到 W10 寄存器
-        // LDRB W10, [X0, #0x1F3]  (Hex: 0A 7C 40 39)
+    unsigned char patch_hp_100k[] = {
+        0x00, 0xD4, 0x90, 0x52, // MOV W0, #34464
+        0x20, 0x00, 0xA0, 0x72, // MOVK W0, #1, LSL 16
+        0xC0, 0x03, 0x5F, 0xD6  // RET
+    };
+    write_code(addr_hp, patch_hp_100k, sizeof(patch_hp_100k));
+
+    // ---------------------------------------------------------
+    // 2. ATK Patch (getCommandCardATK - Smart Float)
+    // 逻辑: 
+    //   if (isEnemy) return 10.0;   (打不动你的 10w 血)
+    //   else         return 500000.0; (秒杀敌人的 10w 血)
+    // ---------------------------------------------------------
+    unsigned char patch_atk_smart[] = {
+        // LDRB W10, [X0, #0x1F3] (读取 isEnemy)
         0x0A, 0x7C, 0x40, 0x39,
+        // CBNZ W10, #12 (如果是敌人，跳到 Offset 20)
+        0x6A, 0x00, 0x00, 0x35,
+        
+        // --- 玩家逻辑 (ATK = 500,000.0) ---
+        // 500,000.0 Hex = 0x48F42400
+        // MOV W0, #0x2400
+        0x00, 0x48, 0x82, 0x52,
+        // MOVK W0, #0x48F4, LSL 16
+        0x80, 0xE8, 0xB1, 0x72,
+        // B #8 (跳过敌人逻辑)
+        0x02, 0x00, 0x00, 0x14,
 
-        // 2. 检查 W10 是否为 0 (0=玩家, 1=敌人)
-        // CBZ W10, #0xC (如果是0，跳转到下方第3条指令之后，即跳过敌人逻辑)
-        // Offset 12 bytes = 3 instructions
-        0x6A, 0x00, 0x00, 0x34,
+        // --- 敌人逻辑 (ATK = 0.0) ---
+        // MOV W0, #0
+        0x00, 0x00, 0x80, 0x52,
 
-        // --- 敌人逻辑 (HP = 1) ---
-        // MOV W0, #1
-        0x20, 0x00, 0x80, 0x52,
-        // RET
-        0xC0, 0x03, 0x5F, 0xD6,
-
-        // --- 玩家逻辑 (HP = 100,000) ---
-        // MOV W0, #0x86A0 (34464)
-        0x00, 0xD4, 0x90, 0x52,
-        // MOVK W0, #1, LSL 16 (Result = 100,000)
-        0x20, 0x00, 0xA0, 0x72,
+        // --- 结束 ---
+        // FMOV S0, W0 (转浮点)
+        0x00, 0x28, 0x00, 0x1E,
         // RET
         0xC0, 0x03, 0x5F, 0xD6
     };
-
-    write_code(addr_hp, patch_hp_smart, sizeof(patch_hp_smart));
+    write_code(addr_atk, patch_atk_smart, sizeof(patch_atk_smart));
     
-    LOGD("Patch Applied! Enemy MaxHP=1, Player MaxHP=100k.");
+    LOGD("Patch Applied! Everyone HP=100k. Player ATK=500k, Enemy ATK=0.");
     return nullptr;
 }
 
