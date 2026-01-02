@@ -14,12 +14,15 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
 // ==========================================
-// 【根据你提供的 Dump 更新 Offset】
+// Offset 配置
 // ==========================================
-// Target: public Single getUpDownAtk(...) -> 返回 Float
-uintptr_t OFFSET_ATK = 0x24bef90; 
-// Target: public Int32 getMaxHp() -> 返回 Int
+// Target: public Int32 getMaxHp() 
+// 我们只改 HP，不改 ATK，防止闪退
 uintptr_t OFFSET_HP  = 0x24a7b20;
+
+// Field Offset: public Boolean isEnemy; // 0x1f3
+// 这是一个非常关键的偏移，用于判断是敌是友
+#define OFFSET_IS_ENEMY 0x1F3
 
 struct callback_data {
     const char *name;
@@ -43,20 +46,19 @@ void *get_base_address_safe(const char *name) {
     return (void *)data.base_addr;
 }
 
-// 通用的内存修改函数
 void write_code(void *dest_addr, unsigned char *code, size_t size) {
     if (dest_addr == nullptr) return;
 
-    // Debug: 打印原始字节确认 Offset 是否有效
     unsigned int *original = (unsigned int *)dest_addr;
     LOGD("Patching: %p | Original Hex: %08X", dest_addr, *original);
 
     long page_size = sysconf(_SC_PAGESIZE);
     void *page_start = (void *)((uintptr_t)dest_addr & ~(page_size - 1));
     
-    if (mprotect(page_start, page_size, PROT_READ | PROT_WRITE) == -1) return;
+    // 需要足够的空间，防止指令越界
+    if (mprotect(page_start, page_size * 2, PROT_READ | PROT_WRITE) == -1) return;
     memcpy(dest_addr, code, size);
-    if (mprotect(page_start, page_size, PROT_READ | PROT_EXEC) == -1) return;
+    if (mprotect(page_start, page_size * 2, PROT_READ | PROT_EXEC) == -1) return;
 
     __builtin___clear_cache((char *)dest_addr, (char *)dest_addr + size);
 }
@@ -80,45 +82,48 @@ void *hack_thread(void *arg) {
     }
     
     LOGD("Found libil2cpp at: %p", il2cpp_base);
-    LOGD("Waiting 15s to bypass initial checks...");
-    sleep(15); 
+    LOGD("Waiting 10s...");
+    sleep(10); 
 
-    void *addr_atk = (void *)((uintptr_t)il2cpp_base + OFFSET_ATK);
     void *addr_hp  = (void *)((uintptr_t)il2cpp_base + OFFSET_HP);
     
-    LOGD("Start Patching with NEW Logic...");
+    LOGD("Applying SMART HP Patch (GodMode + OneHitKill)...");
 
     // ---------------------------------------------------------
-    // 1. ATK Patch (针对 getUpDownAtk, 返回 Float)
-    // 目标: 返回 100,000.0f (Hex: 0x47C35000)
+    // 智能 HP Patch (ARM64 Assembly)
+    // 逻辑：
+    // 1. 读取 this->isEnemy (Offset 0x1F3)
+    // 2. 如果是敌人 (isEnemy != 0) -> 返回 1 (秒杀)
+    // 3. 如果是玩家 (isEnemy == 0) -> 返回 100,000 (无敌)
     // ---------------------------------------------------------
-    // MOV W0, #0x5000       -> 00 A0 80 52
-    // MOVK W0, #0x47C3, LSL#16 -> 60 F8 A8 72
-    // FMOV S0, W0           -> 00 28 00 1E  (将整数转入浮点寄存器 S0)
-    // RET                   -> C0 03 5F D6
-    unsigned char patch_atk_float[] = {
-        0x00, 0xA0, 0x80, 0x52,
-        0x60, 0xF8, 0xA8, 0x72,
-        0x00, 0x28, 0x00, 0x1E,
-        0xC0, 0x03, 0x5F, 0xD6
-    };
-    write_code(addr_atk, patch_atk_float, sizeof(patch_atk_float));
+    unsigned char patch_hp_smart[] = {
+        // 1. 读取 isEnemy 标志位到 W10 寄存器
+        // LDRB W10, [X0, #0x1F3]  (Hex: 0A 7C 40 39)
+        0x0A, 0x7C, 0x40, 0x39,
 
-    // ---------------------------------------------------------
-    // 2. HP Patch (针对 getMaxHp, 返回 Int)
-    // 目标: 返回 100,000 (Hex: 0x186A0)
-    // ---------------------------------------------------------
-    // MOV W0, #34464        -> 00 D4 90 52
-    // MOVK W0, #1, LSL #16  -> 20 00 A0 72
-    // RET                   -> C0 03 5F D6
-    unsigned char patch_hp_int[] = {
+        // 2. 检查 W10 是否为 0 (0=玩家, 1=敌人)
+        // CBZ W10, #0xC (如果是0，跳转到下方第3条指令之后，即跳过敌人逻辑)
+        // Offset 12 bytes = 3 instructions
+        0x6A, 0x00, 0x00, 0x34,
+
+        // --- 敌人逻辑 (HP = 1) ---
+        // MOV W0, #1
+        0x20, 0x00, 0x80, 0x52,
+        // RET
+        0xC0, 0x03, 0x5F, 0xD6,
+
+        // --- 玩家逻辑 (HP = 100,000) ---
+        // MOV W0, #0x86A0 (34464)
         0x00, 0xD4, 0x90, 0x52,
+        // MOVK W0, #1, LSL 16 (Result = 100,000)
         0x20, 0x00, 0xA0, 0x72,
+        // RET
         0xC0, 0x03, 0x5F, 0xD6
     };
-    write_code(addr_hp, patch_hp_int, sizeof(patch_hp_int));
+
+    write_code(addr_hp, patch_hp_smart, sizeof(patch_hp_smart));
     
-    LOGD("Patch Applied! Testing getUpDownAtk (Float) and getMaxHp (Int).");
+    LOGD("Patch Applied! Enemy MaxHP=1, Player MaxHP=100k.");
     return nullptr;
 }
 
