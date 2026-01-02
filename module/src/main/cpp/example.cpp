@@ -99,7 +99,7 @@ public:
         // 2. 检查是不是 FGO
         // 只要包名里包含 "fategrandorder" 就认为是目标 (兼容日服和美服)
         // 如果你是 B服 (bilibili)，请把下面的字符串改成 "fatego"
-        if (raw_process && strstr(raw_process, "fategrandorder")) {
+        if (raw_process && strstr(raw_process, "fatego")) {
             is_target = true;
             LOGD("FGO Detected! Process: %s", raw_process);
         }
