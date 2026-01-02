@@ -9,17 +9,13 @@
 #include <link.h>
 #include "zygisk.hpp"
 
-// ==========================================
-// TAG 保持为 FGO_MOD_TEST
-// ==========================================
 #define TAG "FGO_MOD_TEST"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
 
-// 待验证的地址（2.117.0 版本需要校准）
+// 待验证地址
 uintptr_t OFFSET_HP  = 0x24a7b20; 
 uintptr_t OFFSET_ATK = 0x24be8bc; 
 
-// 辅助函数：查找基址
 struct callback_data {
     const char *name;
     uintptr_t base_addr;
@@ -40,50 +36,47 @@ void *get_base_address(const char *name) {
     return (void *)data.base_addr;
 }
 
-// 辅助函数：读取并打印内存（只读，不改）
 void peek_memory(const char* label, void* base, uintptr_t offset) {
     if (!base) return;
     unsigned char* p = (unsigned char*)((uintptr_t)base + offset);
-    
-    // 读取前 12 个字节，足够我看清是什么指令了
-    LOGD("[%s] Offset: 0x%lx | Hex: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X", 
-         label, offset, 
-         p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11]);
+    LOGD("[%s] Offset: 0x%lx | Hex: %02X %02X %02X %02X %02X %02X %02X %02X", 
+         label, offset, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
 }
 
 // ==========================================
-// 注入线程
+// 核心修改：真正的延迟启动
 // ==========================================
 void *hack_thread(void *arg) {
-    LOGD("=== FGO MOD STARTED (Checking Offsets) ===");
+    // 【关键】线程启动后，强制睡 20 秒。
+    // 这期间完全不占用资源，绝对不会卡死游戏启动。
+    LOGD("=== FGO MOD STARTED: Sleeping 20s to avoid freeze ===");
+    sleep(20); 
     
-    // 1. 等待 libil2cpp.so 加载
-    void *il2cpp_base = nullptr;
-    while (!il2cpp_base) {
-        il2cpp_base = get_base_address("libil2cpp.so");
-        sleep(1);
+    LOGD("=== Waking up to find libil2cpp ===");
+
+    void *il2cpp_base = get_base_address("libil2cpp.so");
+    
+    if (!il2cpp_base) {
+        LOGD("Error: libil2cpp.so not found even after 20s!");
+        return nullptr;
     }
     LOGD("libil2cpp found at: %p", il2cpp_base);
 
-    // 2. 进游戏等待（给足够的时间让战斗逻辑加载）
-    LOGD("Waiting 15 seconds...");
-    sleep(15); 
+    // 再给 5 秒缓冲，确保你进入了战斗界面或者主界面
+    sleep(5); 
 
-    // 3. 读取内存
+    // 读取数据
     peek_memory("HP_ADDR_DATA", il2cpp_base, OFFSET_HP);
     peek_memory("ATK_ADDR_DATA", il2cpp_base, OFFSET_ATK);
     
-    // 4. 尝试向后探测（通常新版本地址会往后移一点点，比如 +0x100 到 +0x2000）
+    // 顺便向后探测一下
     peek_memory("GUESS_1", il2cpp_base, OFFSET_HP + 0x100);
-    peek_memory("GUESS_2", il2cpp_base, OFFSET_HP + 0x500);
+    peek_memory("GUESS_2", il2cpp_base, OFFSET_HP + 0x200);
 
     LOGD("=== ANALYSIS DONE ===");
     return nullptr;
 }
 
-// ==========================================
-// Zygisk 模块主体
-// ==========================================
 class FgoModule : public zygisk::ModuleBase {
 private:
     zygisk::Api *api;
@@ -97,14 +90,10 @@ public:
 
     void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
         const char *process = env->GetStringUTFChars(args->nice_name, nullptr);
-        
-        // 检测包名中是否包含 "fate"
         if (process && strstr(process, "fate")) {
-            LOGD("Detected Game Process: %s", process);
             pthread_t pt;
             pthread_create(&pt, nullptr, hack_thread, nullptr);
         }
-        
         env->ReleaseStringUTFChars(args->nice_name, process);
     }
 };
