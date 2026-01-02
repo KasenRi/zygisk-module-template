@@ -4,32 +4,26 @@
 #include <android/log.h>
 #include <sys/mman.h>
 #include <pthread.h>
-#include <string.h>
 #include <jni.h>
+#include <string.h>
 #include <link.h>
 #include "zygisk.hpp"
 
-// 使用新的 TAG 方便过滤
-#define TAG "FGO_MOD_INSPECT"
+// ==========================================
+// 1. 这里的 TAG 改回你最熟悉的 FGO_MOD_TEST
+// ==========================================
+#define TAG "FGO_MOD_TEST"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
 
-// ==========================================
-// 这里填入我们要侦测的地址
-// 我根据 2.117.0 的大概范围，稍微调整了一下猜测范围
-// 但主要还是看这些地址里到底是啥
-// ==========================================
-uintptr_t OFFSET_HP  = 0x24a7b20; // 之前的地址
-uintptr_t OFFSET_ATK = 0x24be8bc; // 之前的地址
+// 你之前的地址（虽然偏了，但我们需要看它偏哪去了）
+uintptr_t OFFSET_HP  = 0x24a7b20; 
+uintptr_t OFFSET_ATK = 0x24be8bc; 
 
-// ==========================================
-// 辅助功能
-// ==========================================
-
+// 辅助函数：找基址
 struct callback_data {
     const char *name;
     uintptr_t base_addr;
 };
-
 static int dl_iterate_callback(struct dl_phdr_info *info, size_t size, void *data) {
     struct callback_data *cb_data = (struct callback_data *)data;
     if (info->dlpi_name && strstr(info->dlpi_name, cb_data->name)) {
@@ -38,8 +32,7 @@ static int dl_iterate_callback(struct dl_phdr_info *info, size_t size, void *dat
     }
     return 0; 
 }
-
-void *get_base_address_safe(const char *name) {
+void *get_base_address(const char *name) {
     struct callback_data data;
     data.name = name;
     data.base_addr = 0;
@@ -47,45 +40,42 @@ void *get_base_address_safe(const char *name) {
     return (void *)data.base_addr;
 }
 
-// 打印内存 Hex
-void print_hex(const char* label, void* base, uintptr_t offset) {
-    if (base == nullptr) return;
-    void* addr = (void*)((uintptr_t)base + offset);
-    unsigned char* p = (unsigned char*)addr;
-    
-    // 打印 16 个字节
+// 辅助函数：打印内存到底是什么
+void peek_memory(const char* label, void* base, uintptr_t offset) {
+    if (!base) return;
+    unsigned char* p = (unsigned char*)((uintptr_t)base + offset);
+    // 打印前8个字节的机器码，通过这个我就能算出真正的函数在哪
     LOGD("[%s] Offset: 0x%lx | Hex: %02X %02X %02X %02X %02X %02X %02X %02X", 
-         label, offset, 
-         p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
+         label, offset, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
 }
 
 // ==========================================
-// 主线程
+// 主逻辑
 // ==========================================
-
-void *inspect_thread(void *arg) {
-    LOGD("=== FGO INSPECTOR STARTED (v2.117.0 Check) ===");
+void *hack_thread(void *arg) {
+    LOGD("=== FGO MOD STARTED (v2.117.0 Analysis) ===");
     
+    // 1. 等待 libil2cpp 加载
     void *il2cpp_base = nullptr;
     while (!il2cpp_base) {
-        il2cpp_base = get_base_address_safe("libil2cpp.so");
+        il2cpp_base = get_base_address("libil2cpp.so");
         sleep(1);
     }
-    
-    LOGD("Found libil2cpp. Base: %p", il2cpp_base);
-    LOGD("Waiting 10 seconds to ensure game loaded...");
-    sleep(10);
-    
-    // 侦测 1：原来的地址
-    print_hex("HP_Check_Old",  il2cpp_base, OFFSET_HP);
-    print_hex("ATK_Check_Old", il2cpp_base, OFFSET_ATK);
+    LOGD("libil2cpp found at: %p", il2cpp_base);
 
-    // 侦测 2：稍微往后偏移一点（通常版本更新地址会后移）
-    // 比如 +0x10000 左右
-    print_hex("HP_Check_Guess1", il2cpp_base, OFFSET_HP + 0x15000); 
-    print_hex("ATK_Check_Guess1", il2cpp_base, OFFSET_ATK + 0x15000);
+    // 2. 等待进图
+    LOGD("Waiting 15 seconds for game to load...");
+    sleep(15); 
 
-    LOGD("=== INSPECTION DONE. Please copy the logs. ===");
+    // 3. 不修改，只读取！(防止之前的红血BUG)
+    // 只要把这两行日志发给我，我就能算出修正后的 Offset
+    peek_memory("HP_ADDR_DATA", il2cpp_base, OFFSET_HP);
+    peek_memory("ATK_ADDR_DATA", il2cpp_base, OFFSET_ATK);
+    
+    // 顺便看一眼后面一点点的地方（通常新版本地址会往后移）
+    peek_memory("HP_ADDR_GUESS", il2cpp_base, OFFSET_HP + 0x200); 
+
+    LOGD("=== ANALYSIS DONE ===");
     return nullptr;
 }
 
@@ -97,19 +87,13 @@ public:
     }
     void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
         const char *process = env->GetStringUTFChars(args->nice_name, nullptr);
-        if (process && strstr(process, "fate")) is_target_app = true;
-        if (process) env->ReleaseStringUTFChars(args->nice_name, process);
-    }
-    void postAppSpecialize(const zygisk::AppSpecializeArgs *args) override {
-        if (is_target_app) {
+        // 这里保留之前的判断逻辑
+        if (process && strstr(process, "fate")) {
             pthread_t pt;
-            pthread_create(&pt, nullptr, inspect_thread, nullptr);
+            pthread_create(&pt, nullptr, hack_thread, nullptr);
         }
+        env->ReleaseStringUTFChars(args->nice_name, process);
     }
-private:
-    zygisk::Api *api;
-    JNIEnv *env;
-    bool is_target_app = false;
 };
 
 REGISTER_ZYGISK_MODULE(FgoModule)
